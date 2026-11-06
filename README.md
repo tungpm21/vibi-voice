@@ -1,5 +1,15 @@
 # vibi-voice
 
+> **Gửi Claude / agent được nhờ cài plugin này** (người dùng chỉ đưa link repo):
+>
+> 1. Đây là plugin Claude Code có marketplace riêng. Cài bằng CLI, **không** clone hay chép thư mục vào `~/.claude/skills`:
+>    `claude plugin marketplace add tungpm21/vibi-voice` (đã có thì `claude plugin marketplace update vibi-voice`), rồi `claude plugin install vibi-voice@vibi-voice`, rồi `claude plugin list` để xác nhận.
+> 2. Tìm lệnh Python 3.8+ chạy được (`python`, `python3` hoặc `py -3`). Script nằm ở `~/.claude/plugins/cache/vibi-voice/vibi-voice/<version>/skills/vibi-voice/scripts/vibi.py`. Chạy `<python> "<đường dẫn tuyệt đối>" credits`.
+> 3. Nếu báo thiếu key: **không hỏi key trong chat**, không tự ghi key ra file. Đưa người dùng đúng một lệnh có đường dẫn tuyệt đối để họ tự chạy trong terminal: `<python> "<đường dẫn>" set-key`. Họ báo xong thì chạy lại `credits`.
+> 4. Nhắc người dùng khởi động lại Claude Code (hoặc `/reload-plugins`) để skill `vibi-voice:vibi-voice` hiện ra.
+>
+> Bản đầy đủ từng bước, kèm cách xử lý lỗi: [INSTALL-PROMPT.md](INSTALL-PROMPT.md).
+
 Plugin Claude Code: tạo giọng đọc qua Vibi (api.vibi.pro). Một key Vibi dùng được ElevenLabs (mặc định `eleven_v4_turbo`), MiniMax và CapCut. Cài xong, agent tự biết cách tìm giọng, xem credit, đọc thử rồi đọc cả kịch bản.
 
 Cần: Claude Code, Python 3.8+ và một tài khoản Vibi có API key riêng (credit trừ theo key của bạn). Không cần cài thêm gói Python nào.
