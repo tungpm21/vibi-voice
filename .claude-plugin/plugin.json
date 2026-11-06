@@ -1,0 +1,11 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "vibi-voice",
+  "version": "1.1.0",
+  "description": "Tạo giọng đọc qua Vibi (api.vibi.pro): ElevenLabs v4, MiniMax, CapCut bằng một key",
+  "author": {
+    "name": "tungpm21",
+    "email": "tungpm21@users.noreply.github.com"
+  },
+  "keywords": ["tts", "voice", "elevenlabs", "minimax", "capcut", "vibi", "vietnamese"]
+}
