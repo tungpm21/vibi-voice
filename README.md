@@ -4,7 +4,11 @@ Plugin Claude Code: tạo giọng đọc qua Vibi (api.vibi.pro). Một key Vibi
 
 Cần: Claude Code và Python 3.8+. Không cần cài thêm gói Python nào.
 
-## Cài trên máy khác (Claude Code)
+## Cài nhanh bằng một prompt
+
+Mở [INSTALL-PROMPT.md](INSTALL-PROMPT.md), chép khối prompt vào Claude Code trên máy mới và gửi. Agent tự kiểm tra Python và quyền GitHub, cài plugin, rồi đưa bạn đúng một lệnh để tự nhập key. Key không bao giờ đi qua chat.
+
+## Cài tay trên máy khác (Claude Code)
 
 **Cách 1: chép thư mục.** Chép cả thư mục `vibi-voice` sang máy kia (USB, Google Drive, zip...), rồi chạy:
 

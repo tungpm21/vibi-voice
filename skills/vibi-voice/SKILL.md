@@ -8,7 +8,7 @@ description: Tạo giọng đọc (text-to-speech) qua Vibi (api.vibi.pro), mộ
 Mọi thao tác đi qua một script, chỉ dùng thư viện chuẩn của Python 3.8+:
 
 ```
-python "<thư mục skill này>/scripts/vibi.py" <lệnh> ...
+python "${CLAUDE_SKILL_DIR}/scripts/vibi.py" <lệnh> ...
 ```
 
 Mỗi lệnh in ra một object JSON. `"ok": false` kèm `error` là lỗi; đọc `error` rồi báo người dùng, đừng đoán.
@@ -20,7 +20,7 @@ Script tìm `VIBI_API_KEY` theo thứ tự: biến môi trường, file `.env` �
 Nếu báo thiếu key: bảo người dùng **tự chạy** lệnh dưới trong terminal của họ (key được gõ ẩn và lưu vào `~/.config/vibi/.env`). Không bao giờ xin họ dán key vào chat, không tự ghi key ra file.
 
 ```
-python "<thư mục skill>/scripts/vibi.py" set-key
+python "${CLAUDE_SKILL_DIR}/scripts/vibi.py" set-key
 ```
 
 ## Quy trình
