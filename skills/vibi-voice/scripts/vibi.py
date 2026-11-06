@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Vibi voice CLI: text-to-speech through api.vibi.pro (ElevenLabs, MiniMax, CapCut).
+"""Vibi CLI for api.vibi.pro: text-to-speech (ElevenLabs, MiniMax, CapCut), dialogue,
+voice changer, AI dubbing, MiniMax voice cloning, speech-to-text and task history.
+API reference: https://vibi.pro/docs
 
 Standard library only, Python 3.8+. Every command prints one JSON object.
 
@@ -52,8 +54,9 @@ SETTINGS = {
 }
 SPEED_RANGE = {"elevenlabs": (0.7, 1.2), "minimax": (0.5, 2.0), "capcut": (0.5, 2.0)}
 # Measured 2026-11-06: eleven_v4_turbo charged 44 credits for 87 characters,
-# capcut 1 credit for 46 characters. Other models assume 1 credit per character.
-CREDITS_PER_CHAR = {"eleven_v4_turbo": 0.5, "capcut": 0.025}
+# capcut 1 credit for 46, speech-2.8-turbo 31 for 51, dialogue 17 for 69 (mixed).
+# Other models assume 1 credit per character.
+CREDITS_PER_CHAR = {"eleven_v4_turbo": 0.5, "capcut": 0.025, "speech-2.8-turbo": 0.6}
 
 
 class VibiError(Exception):
@@ -146,12 +149,130 @@ def download(url: str, out: Path) -> None:
     if parsed.netloc == API_HOST:  # never send the key to a CDN
         headers["xi-api-key"] = find_key()
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        content = resp.read()
-    if not content:
-        raise VibiError(f"Empty file from {url}")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(content)
+    part = out.with_name(out.name + ".part")
+    with urllib.request.urlopen(req, timeout=600) as resp, open(part, "wb") as handle:
+        while True:
+            block = resp.read(1 << 20)
+            if not block:
+                break
+            handle.write(block)
+    if part.stat().st_size == 0:
+        part.unlink()
+        raise VibiError(f"Empty file from {url}")
+    part.replace(out)
+
+
+def multipart(path: str, fields: dict, files: list, timeout: int = 300) -> dict:
+    """POST multipart/form-data. fields: name -> str | list[str] (repeated);
+    files: [(field_name, filename, bytes)]."""
+    key = find_key()
+    boundary = "----vibi" + os.urandom(12).hex()
+    parts = []
+    for name, value in fields.items():
+        for item in value if isinstance(value, list) else [value]:
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{item}\r\n'.encode()
+            )
+    for field, filename, content in files:
+        parts.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+                f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            ).encode()
+            + content
+            + b"\r\n"
+        )
+    parts.append(f"--{boundary}--\r\n".encode())
+    req = urllib.request.Request(
+        API_BASE + path,
+        data=b"".join(parts),
+        method="POST",
+        headers={
+            "xi-api-key": key,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "vibi-voice-skill/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise VibiError(f"HTTP {exc.code} on {path}: {detail}".replace(key, "[REDACTED]"))
+    except urllib.error.URLError as exc:
+        raise VibiError(f"Cannot reach {API_HOST}: {exc.reason}")
+    return json.loads(raw.decode("utf-8")) if raw else {}
+
+
+# Task families and where their history lives.
+KINDS = {
+    "tts": "/v1/history",  # text-to-speech and dialogue
+    "voice-changer": "/v1/voice-changer/history",
+    "dubbing": "/v1/aidubbing/history",
+    "stt": "/v1/speech-to-text",
+}
+RETRYABLE = ("tts", "voice-changer", "dubbing")
+
+
+def poll(kind: str, task_id: str, max_wait: int, out_hint: str = "OUT") -> dict:
+    """Poll a task until completed; raise on failure or timeout."""
+    deadline = time.monotonic() + max_wait
+    while True:
+        task = request("GET", f"{KINDS[kind]}/{task_id}", timeout=30)
+        status = task.get("status")
+        if status in ("completed", "done"):
+            return task
+        if status == "failed":
+            detail = task.get("detail_error")
+            raise VibiError(
+                f"{kind} task {task_id} failed: {task.get('error')}" + (f" ({detail})" if detail else "")
+            )
+        if time.monotonic() >= deadline:
+            raise VibiError(
+                f"{kind} task {task_id} still {status} ({task.get('progress')}%); finish later with: "
+                f"vibi.py task {task_id} --kind {kind} --download {out_hint}"
+            )
+        time.sleep(3 if kind == "dubbing" else 2)
+
+
+def save_outputs(task: dict, out: Path) -> dict:
+    """Download result.audio_url to `out` (keeping the URL's extension when `out`
+    has none) and result.srt_url next to it."""
+    result = task.get("result") or {}
+    saved = {}
+    audio_url = result.get("audio_url")
+    if audio_url:
+        url_suffix = Path(urllib.parse.urlparse(audio_url).path).suffix
+        target = out if out.suffix else out.with_suffix(url_suffix or ".mp3")
+        download(audio_url, target)
+        saved["output"] = str(target)
+        saved["bytes"] = target.stat().st_size
+    srt_url = result.get("srt_url")
+    if srt_url:
+        srt_path = (Path(saved["output"]) if saved else out).with_suffix(".srt")
+        download(srt_url, srt_path)
+        saved["srt"] = str(srt_path)
+    if not saved:
+        raise VibiError(f"Task {task.get('id') or task.get('task_id')} has no downloadable result")
+    return saved
+
+
+def _probe_seconds(path: Path) -> float | None:
+    """Media duration via ffprobe, if installed (used for credit estimates)."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+        return float(out) if out else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 # ---- commands -----------------------------------------------------------
@@ -192,13 +313,15 @@ def cmd_voices(args) -> dict:
     for v in voices:
         slim.append(
             {
-                "voice_id": v.get("voice_id"),
+                "voice_id": v.get("voice_id") or v.get("id"),
                 "uniq_id": v.get("uniq_id"),
+                "status": v.get("status"),
+                "error": v.get("error_message"),
                 "name": v.get("name") or v.get("voice_name"),
                 "gender": v.get("gender"),
                 "language": v.get("language"),
                 "tags": v.get("tags") or v.get("tag_list"),
-                "preview": v.get("preview_url") or v.get("sample_audio"),
+                "preview": v.get("preview_url") or v.get("sample_audio") or v.get("sample_audio_url"),
                 "description": (v.get("description") or "")[:160] or None,
             }
         )
@@ -324,62 +447,18 @@ def _iso_lang(lang: str) -> str:
     return _ISO.get((lang or "").strip().lower(), lang)
 
 
-def _post_multipart(path: str, fields: dict, file_path: Path, timeout=120) -> dict:
-    key = find_key()
-    boundary = "----vibi" + os.urandom(12).hex()
-    parts = []
-    for name, value in fields.items():
-        parts.append(
-            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
-        )
-    parts.append(
-        (
-            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
-            f'filename="{file_path.name}"\r\nContent-Type: application/octet-stream\r\n\r\n'
-        ).encode()
-        + file_path.read_bytes()
-        + b"\r\n"
-    )
-    parts.append(f"--{boundary}--\r\n".encode())
-    req = urllib.request.Request(
-        API_BASE + path,
-        data=b"".join(parts),
-        method="POST",
-        headers={
-            "xi-api-key": key,
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "User-Agent": "vibi-voice-skill/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:300]
-        raise VibiError(f"HTTP {exc.code} on {path}: {detail}".replace(key, "[REDACTED]"))
-
-
 def transcribe_words(audio: Path, lang: str, max_wait: int = 300) -> dict:
     """Run Vibi speech-to-text (Scribe v2) and return the finished task."""
-    submitted = _post_multipart(
+    submitted = multipart(
         "/v1/speech-to-text",
         {"language_code": _iso_lang(lang), "timestamps_granularity": "word",
          "tag_audio_events": "false"},
-        audio,
+        [("file", audio.name, audio.read_bytes())],
     )
     task_id = submitted.get("task_id") or submitted.get("id")
     if not task_id:
         raise VibiError(f"No task id from speech-to-text: {submitted}")
-    deadline = time.monotonic() + max_wait
-    while True:
-        task = request("GET", f"/v1/speech-to-text/{task_id}", timeout=20)
-        if task.get("status") == "completed":
-            return task
-        if task.get("status") == "failed":
-            raise VibiError(f"Speech-to-text failed: {task.get('detail_error')}")
-        if time.monotonic() >= deadline:
-            raise VibiError(f"Speech-to-text task {task_id} still running")
-        time.sleep(2)
+    return poll("stt", task_id, max_wait)
 
 
 def _norm(token: str) -> str:
@@ -514,6 +593,318 @@ def cmd_words(args) -> dict:
     return word_timings(audio, script, args.lang, args.words_per_cue, args.max_wait)
 
 
+# ---- dialogue (several voices in one file) ------------------------------
+
+
+def _parse_speaker(spec: str, default_lang: str) -> tuple:
+    """'Name=provider:voice_id[:model[:language]]' -> (name, config)."""
+    name, sep, rest = spec.partition("=")
+    bits = rest.split(":") if sep else []
+    if not name.strip() or len(bits) < 2:
+        raise VibiError(f"--speaker needs Name=provider:voice_id[:model[:language]], got {spec!r}")
+    provider, voice = bits[0].strip(), bits[1].strip()
+    if provider not in PROVIDERS:
+        raise VibiError(f"--speaker {name}: provider must be one of {', '.join(PROVIDERS)}")
+    model = (bits[2].strip() if len(bits) > 2 and bits[2].strip() else DEFAULT_MODELS[provider])
+    lang = bits[3].strip() if len(bits) > 3 and bits[3].strip() else default_lang
+    if provider == "minimax" and len(lang) <= 3:
+        lang = {v: k.title() for k, v in _ISO.items()}.get(lang, lang)  # vi -> Vietnamese
+    return name.strip(), {"provider": provider, "voice_id": voice, "model_id": model, "language_code": lang}
+
+
+def _spoken_text(script: str) -> str:
+    """Dialogue script without the 'Name:' prefixes, for word timings."""
+    import re
+
+    return "\n".join(re.sub(r"^\s*[^:\n]{1,40}:\s*", "", line) for line in script.splitlines())
+
+
+def cmd_dialogue(args) -> dict:
+    script = (
+        Path(args.script_file).read_text(encoding="utf-8") if args.script_file else (args.text or "")
+    ).strip()
+    if not script:
+        raise VibiError("Give --script-file or --text in 'Name: line' format")
+    speakers = {}
+    if args.speakers_json:
+        speakers.update(json.loads(Path(args.speakers_json).read_text(encoding="utf-8")))
+    for spec in args.speaker or []:
+        name, config = _parse_speaker(spec, args.lang)
+        speakers[name] = config
+    if len(speakers) < 2:
+        raise VibiError("Dialogue needs at least 2 speakers (--speaker or --speakers-json)")
+    body = {"text": script, "speakers": speakers}
+    if args.pause is not None:
+        if not 0 <= args.pause <= 3:
+            raise VibiError("--pause must be 0-3 seconds")
+        body["pause_between_turns"] = args.pause
+    spoken = _spoken_text(script)
+    estimate = sum(
+        len(spoken) * CREDITS_PER_CHAR.get(c.get("model_id"), 1.0) for c in speakers.values()
+    ) / len(speakers)
+    if args.dry_run:
+        return {"dry_run": True, "request": body, "estimated_credits": round(estimate, 1)}
+    submitted = request("POST", "/v1/dialogue", body=body)
+    task_id = submitted.get("id") or submitted.get("task_id")
+    if not task_id:
+        raise VibiError(f"No task id in response: {submitted}")
+    task = poll("tts", task_id, args.max_wait, args.out)
+    report = {"task_id": task_id, **save_outputs(task, Path(args.out)),
+              "characters_used": task.get("characters_used"),
+              "credits_deducted": task.get("credits_deducted"),
+              "estimated_credits": round(estimate, 1)}
+    if args.word_srt:
+        try:
+            report["word_srt"] = word_timings(
+                Path(report["output"]), spoken, args.lang, args.words_per_cue, args.max_wait
+            )
+        except VibiError as exc:
+            report["word_srt_error"] = str(exc)
+    return report
+
+
+# ---- voice changer (speech-to-speech, ElevenLabs voices) -----------------
+
+
+def cmd_voice_change(args) -> dict:
+    audio = Path(args.audio)
+    if not audio.is_file():
+        raise VibiError(f"No audio file at {audio}")
+    seconds = _probe_seconds(audio)
+    estimate = round(seconds / 60 * 1000) if seconds else None  # docs: ~1000 credits/minute
+    fields = {"voice_id": args.voice, "model_id": args.model,
+              "remove_background_noise": "true" if args.denoise else "false"}
+    settings = {k: getattr(args, k) for k in ("stability", "similarity_boost", "style", "use_speaker_boost")
+                if getattr(args, k) is not None}
+    if settings:
+        fields["voice_settings"] = json.dumps(settings)
+    if args.dry_run:
+        return {"dry_run": True, "fields": fields, "audio_seconds": seconds, "estimated_credits": estimate}
+    submitted = multipart("/v1/voice-changer", fields, [("audio", audio.name, audio.read_bytes())])
+    task_id = submitted.get("task_id") or submitted.get("id")
+    if not task_id:
+        raise VibiError(f"No task id in response: {submitted}")
+    task = poll("voice-changer", task_id, args.max_wait, args.out)
+    return {"task_id": task_id, **save_outputs(task, Path(args.out)),
+            "credits_deducted": task.get("credits_deducted"), "estimated_credits": estimate}
+
+
+# ---- AI dubbing (translate + re-voice an audio or video) -----------------
+
+
+def cmd_dub(args) -> dict:
+    source = Path(args.source)
+    if not source.is_file():
+        raise VibiError(f"No source file at {source}")
+    seconds = _probe_seconds(source)
+    estimate = round(seconds * 50) if seconds else None  # docs: 50 credits per source second
+    fields = {"target_language": args.to, "source_language": args.source_lang,
+              "provider": args.provider, "voice_id": args.voice, "filename": source.name}
+    if args.content_type:
+        fields["content_type"] = args.content_type
+    elif source.suffix.lower() in (".mp4", ".mov"):
+        fields["content_type"] = "video/mp4" if source.suffix.lower() == ".mp4" else "video/quicktime"
+    if args.dry_run:
+        return {"dry_run": True, "fields": fields, "source_seconds": seconds,
+                "estimated_credits": estimate,
+                "note": "50 credits per second of source, charged upfront"}
+    init = request("POST", "/v1/aidubbing/upload/init", body={})
+    upload_id, chunk_size = init.get("upload_id"), int(init.get("chunk_size") or 50 * 1024 * 1024)
+    if not upload_id:
+        raise VibiError(f"upload/init returned no upload_id: {init}")
+    chunk_size = min(chunk_size, 100 * 1024 * 1024)
+    index = 0
+    with open(source, "rb") as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            multipart("/v1/aidubbing/upload/chunk", {"upload_id": upload_id, "index": str(index)},
+                      [("chunk", f"{source.name}.part{index}", block)], timeout=600)
+            index += 1
+    if index == 0:
+        raise VibiError("Source file is empty")
+    submitted = multipart("/v1/aidubbing/upload/complete",
+                          {**fields, "upload_id": upload_id, "total_chunks": str(index)}, [])
+    task_id = submitted.get("task_id") or submitted.get("id")
+    if not task_id:
+        raise VibiError(f"No task id in response: {submitted}")
+    task = poll("dubbing", task_id, args.max_wait, args.out)
+    return {"task_id": task_id, **save_outputs(task, Path(args.out)), "chunks": index,
+            "credits_deducted": task.get("credits_deducted"), "estimated_credits": estimate}
+
+
+# ---- MiniMax voice cloning ------------------------------------------------
+
+
+def _find_clone(clone_id: str) -> dict | None:
+    for voice in request("GET", "/v1/minimax/voices").get("voices", []):
+        if voice.get("id") == clone_id:
+            return voice
+    return None
+
+
+def _wait_clone(clone_id: str, max_wait: int) -> dict:
+    deadline = time.monotonic() + max_wait
+    while True:
+        voice = _find_clone(clone_id)
+        status = (voice or {}).get("status")
+        if status == "done":
+            return voice
+        if status == "failed":
+            raise VibiError(f"Clone {clone_id} failed: {voice}")
+        if voice is None:
+            raise VibiError(f"Clone {clone_id} not found")
+        if time.monotonic() >= deadline:
+            raise VibiError(f"Clone {clone_id} still {status}; check later with: vibi.py voices --provider minimax --library cloned")
+        time.sleep(3)
+
+
+def cmd_clone(args) -> dict:
+    audio = Path(args.audio)
+    if not audio.is_file():
+        raise VibiError(f"No audio file at {audio}")
+    if audio.stat().st_size > 20 * 1024 * 1024:
+        raise VibiError("Clone source must be at most 20 MB")
+    fields = {"voice_name": args.name, "language_tag": args.language, "gender": args.gender,
+              "need_noise_reduction": "false" if args.no_denoise else "true"}
+    if args.preview_text:
+        fields["preview_text"] = args.preview_text[:200]
+    created = multipart("/v1/minimax/voices/clone", fields, [("file", audio.name, audio.read_bytes())])
+    clone_id = created.get("id")
+    if not clone_id:
+        raise VibiError(f"No clone id in response: {created}")
+    voice = _wait_clone(clone_id, args.max_wait)
+    report = {"clone_id": clone_id, "voice_name": voice.get("voice_name"), "status": voice.get("status"),
+              "use_with": f"speak --provider minimax --voice {clone_id}",
+              "sample_audio_url": voice.get("sample_audio_url")}
+    if args.sample_out and voice.get("sample_audio_url"):
+        download(voice["sample_audio_url"], Path(args.sample_out))
+        report["sample"] = args.sample_out
+    return report
+
+
+def cmd_clone_retry(args) -> dict:
+    created = request("POST", f"/v1/minimax/voices/{urllib.parse.quote(args.clone_id)}/retry")
+    voice = _wait_clone(created.get("id") or args.clone_id, args.max_wait)
+    return {"clone_id": voice.get("id"), "status": voice.get("status")}
+
+
+def cmd_clone_delete(args) -> dict:
+    return request("DELETE", f"/v1/minimax/voices/{urllib.parse.quote(args.clone_id)}")
+
+
+# ---- full speech-to-text --------------------------------------------------
+
+
+def cmd_transcribe(args) -> dict:
+    audio = Path(args.audio)
+    if not audio.is_file():
+        raise VibiError(f"No audio file at {audio}")
+    fields = {"language_code": _iso_lang(args.lang), "timestamps_granularity": args.granularity,
+              "tag_audio_events": "true" if args.audio_events else "false"}
+    if args.diarize:
+        fields["diarize"] = "true"
+        if args.num_speakers:
+            fields["num_speakers"] = str(args.num_speakers)
+    if args.no_verbatim:
+        fields["no_verbatim"] = "true"
+    if args.keyterm:
+        fields["keyterms"] = list(args.keyterm)
+    if args.format:
+        fields["additional_formats"] = list(args.format)
+    for item in args.field or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise VibiError(f"--field needs key=value, got {item!r}")
+        fields.setdefault(key, [])
+        if not isinstance(fields[key], list):
+            fields[key] = [fields[key]]
+        fields[key].append(value)
+    submitted = multipart("/v1/speech-to-text", fields, [("file", audio.name, audio.read_bytes())])
+    task_id = submitted.get("task_id") or submitted.get("id")
+    if not task_id:
+        raise VibiError(f"No task id from speech-to-text: {submitted}")
+    task = poll("stt", task_id, args.max_wait)
+    result = task.get("result") or {}
+    prefix = Path(args.out_prefix) if args.out_prefix else audio.with_suffix("")
+    json_path = Path(f"{prefix}.transcript.json")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    files = [str(json_path)]
+    for extra in result.get("additional_formats") or []:
+        ext = extra.get("file_extension") or extra.get("requested_format") or "txt"
+        content = extra.get("content") or ""
+        path = Path(f"{prefix}.{ext}")
+        if extra.get("is_base64_encoded"):
+            import base64
+
+            path.write_bytes(base64.b64decode(content))
+        else:
+            path.write_text(content, encoding="utf-8")
+        files.append(str(path))
+    return {"task_id": task_id, "text": (result.get("text") or "")[:500],
+            "language_code": result.get("language_code"),
+            "audio_seconds": task.get("audio_duration_secs"),
+            "credits_deducted": task.get("credits_deducted"), "files": files}
+
+
+# ---- history: list, inspect, download, retry, delete ---------------------
+
+
+def _slim_task(task: dict) -> dict:
+    keep = ("id", "task_id", "status", "progress", "provider", "voice_id", "model_id",
+            "source_lang", "target_lang", "filename", "audio_duration_secs",
+            "characters_used", "credits_deducted", "error", "created_at")
+    slim = {k: task.get(k) for k in keep if task.get(k) not in (None, "")}
+    if task.get("text"):
+        slim["text"] = task["text"][:80]
+    if task.get("result") and isinstance(task["result"], dict):
+        slim["result"] = {k: v for k, v in task["result"].items() if k.endswith("_url")}
+    return slim
+
+
+def cmd_history(args) -> dict:
+    data = request("GET", KINDS[args.kind], params={"page": args.page, "page_size": args.page_size})
+    return {"kind": args.kind, "has_more": data.get("has_more"),
+            "tasks": [_slim_task(t) for t in data.get("tasks", [])]}
+
+
+def cmd_task(args) -> dict:
+    task = request("GET", f"{KINDS[args.kind]}/{urllib.parse.quote(args.task_id)}")
+    report = {"kind": args.kind, "task": _slim_task(task) if args.kind != "stt" else
+              {k: v for k, v in task.items() if k != "result"}}
+    if args.download:
+        if task.get("status") not in ("completed", "done"):
+            raise VibiError(f"Task is {task.get('status')} ({task.get('progress')}%), nothing to download yet")
+        if args.kind == "stt":
+            path = Path(args.download)
+            path.write_text(json.dumps(task.get("result"), ensure_ascii=False, indent=1), encoding="utf-8")
+            report["saved"] = {"output": str(path)}
+        else:
+            report["saved"] = save_outputs(task, Path(args.download))
+    return report
+
+
+def cmd_retry(args) -> dict:
+    if args.kind not in RETRYABLE:
+        raise VibiError(f"{args.kind} tasks cannot be retried")
+    submitted = request("POST", f"{KINDS[args.kind]}/{urllib.parse.quote(args.task_id)}/retry")
+    task_id = submitted.get("id") or submitted.get("task_id") or args.task_id
+    report = {"kind": args.kind, "task_id": task_id, "status": submitted.get("status"),
+              "note": "retry charges credits again"}
+    if args.out:
+        task = poll(args.kind, task_id, args.max_wait, args.out)
+        report.update(save_outputs(task, Path(args.out)))
+        report["credits_deducted"] = task.get("credits_deducted")
+    return report
+
+
+def cmd_delete(args) -> dict:
+    return {"kind": args.kind, "task_id": args.task_id,
+            "response": request("DELETE", f"{KINDS[args.kind]}/{urllib.parse.quote(args.task_id)}")}
+
+
 # ---- cli ----------------------------------------------------------------
 
 
@@ -573,6 +964,97 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lang", default="vi")
     p.add_argument("--words-per-cue", type=int, default=1)
     p.add_argument("--max-wait", type=int, default=300)
+
+    p = sub.add_parser("dialogue", help="Several voices in one file, 'Name: line' script (spends credits)")
+    p.add_argument("--script-file", help="UTF-8 file, one 'Name: line' per turn")
+    p.add_argument("--text", help="script inline instead of --script-file")
+    p.add_argument("--speaker", action="append",
+                   help="Name=provider:voice_id[:model[:language]], repeat per speaker")
+    p.add_argument("--speakers-json", help="JSON {Name: {provider, voice_id, model_id, language_code, voice_settings}}")
+    p.add_argument("--out", required=True)
+    p.add_argument("--lang", default="vi", help="default language for speakers")
+    p.add_argument("--pause", type=float, help="seconds of silence between turns, 0-3")
+    p.add_argument("--max-wait", type=int, default=600)
+    p.add_argument("--dry-run", action="store_true")
+    _word_args(p)
+
+    p = sub.add_parser("voice-change", help="Re-voice an audio file with an ElevenLabs voice (~1000 credits/min)")
+    p.add_argument("audio")
+    p.add_argument("--voice", required=True, help="target ElevenLabs voice_id")
+    p.add_argument("--out", required=True)
+    p.add_argument("--model", default="eleven_multilingual_sts_v2")
+    p.add_argument("--denoise", action="store_true", help="remove background noise first")
+    p.add_argument("--stability", type=float)
+    p.add_argument("--similarity-boost", dest="similarity_boost", type=float)
+    p.add_argument("--style", type=float)
+    p.add_argument("--speaker-boost", dest="use_speaker_boost", action="store_true", default=None)
+    p.add_argument("--max-wait", type=int, default=600)
+    p.add_argument("--dry-run", action="store_true", help="show fields and credit estimate only")
+
+    p = sub.add_parser("dub", help="AI dubbing: translate and re-voice audio/video (50 credits per source second)")
+    p.add_argument("source", help="mp3, wav, aac, m4a, mp4 or mov; max 2 GB / 2.5 h")
+    p.add_argument("--to", required=True, help="target language ISO code, e.g. vi")
+    p.add_argument("--from", dest="source_lang", required=True, help="source language ISO code ('auto' not accepted)")
+    p.add_argument("--provider", choices=PROVIDERS, default="minimax")
+    p.add_argument("--voice", required=True,
+                   help="MiniMax uniq_id or clone id; ElevenLabs voice_id; CapCut voice_id")
+    p.add_argument("--out", required=True, help="dubbed file; extension follows the result if omitted")
+    p.add_argument("--content-type", help="MIME type hint, e.g. video/mp4")
+    p.add_argument("--max-wait", type=int, default=3600)
+    p.add_argument("--dry-run", action="store_true", help="show fields and credit estimate only")
+
+    p = sub.add_parser("clone", help="Clone a voice with MiniMax from an audio sample")
+    p.add_argument("audio", help="clean speech sample, max 20 MB")
+    p.add_argument("--name", required=True)
+    p.add_argument("--language", default="Vietnamese", help="MiniMax language name")
+    p.add_argument("--gender", default="Male", choices=("Male", "Female"))
+    p.add_argument("--no-denoise", action="store_true")
+    p.add_argument("--preview-text", help="sample sentence, max 200 characters")
+    p.add_argument("--sample-out", help="save the preview sample here")
+    p.add_argument("--max-wait", type=int, default=600)
+
+    p = sub.add_parser("clone-retry", help="Re-run a MiniMax clone (charges again)")
+    p.add_argument("clone_id")
+    p.add_argument("--max-wait", type=int, default=600)
+
+    p = sub.add_parser("clone-delete", help="Delete a MiniMax cloned voice (permanent)")
+    p.add_argument("clone_id")
+
+    p = sub.add_parser("transcribe", help="Speech-to-text with all Scribe v2 options (~0.3 credit/s)")
+    p.add_argument("audio")
+    p.add_argument("--lang", default="vi")
+    p.add_argument("--granularity", choices=("word", "character", "none"), default="word")
+    p.add_argument("--diarize", action="store_true", help="label speakers")
+    p.add_argument("--num-speakers", type=int)
+    p.add_argument("--no-verbatim", action="store_true", help="drop fillers and false starts")
+    p.add_argument("--audio-events", action="store_true", help="keep (laughter), (music) tags")
+    p.add_argument("--keyterm", action="append", help="word or name to bias toward, repeatable")
+    p.add_argument("--format", action="append",
+                   choices=("srt", "txt", "docx", "html", "pdf", "segmented_json"),
+                   help="extra export format, repeatable")
+    p.add_argument("--field", action="append", help="any other form field key=value (entity_detection=pii ...)")
+    p.add_argument("--out-prefix", help="default: audio path without extension")
+    p.add_argument("--max-wait", type=int, default=900)
+
+    p = sub.add_parser("history", help="List past tasks (free)")
+    p.add_argument("--kind", choices=tuple(KINDS), default="tts")
+    p.add_argument("--page", type=int, default=0)
+    p.add_argument("--page-size", type=int, default=20)
+
+    p = sub.add_parser("task", help="Show one task; --download saves its result (free)")
+    p.add_argument("task_id")
+    p.add_argument("--kind", choices=tuple(KINDS), default="tts")
+    p.add_argument("--download", help="save the result here")
+
+    p = sub.add_parser("retry", help="Re-run a tts/dialogue, voice-changer or dubbing task (charges again)")
+    p.add_argument("task_id")
+    p.add_argument("--kind", choices=RETRYABLE, default="tts")
+    p.add_argument("--out", help="wait and save the new result here")
+    p.add_argument("--max-wait", type=int, default=900)
+
+    p = sub.add_parser("delete", help="Delete a task and its stored files (permanent)")
+    p.add_argument("task_id")
+    p.add_argument("--kind", choices=tuple(KINDS), default="tts")
     return parser
 
 
@@ -592,6 +1074,17 @@ COMMANDS = {
     "speak": cmd_speak,
     "resume": cmd_resume,
     "words": cmd_words,
+    "dialogue": cmd_dialogue,
+    "voice-change": cmd_voice_change,
+    "dub": cmd_dub,
+    "clone": cmd_clone,
+    "clone-retry": cmd_clone_retry,
+    "clone-delete": cmd_clone_delete,
+    "transcribe": cmd_transcribe,
+    "history": cmd_history,
+    "task": cmd_task,
+    "retry": cmd_retry,
+    "delete": cmd_delete,
 }
 
 

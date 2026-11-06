@@ -10,11 +10,34 @@
 >
 > Bản đầy đủ từng bước, kèm cách xử lý lỗi: [INSTALL-PROMPT.md](INSTALL-PROMPT.md).
 
-Plugin Claude Code: tạo giọng đọc qua Vibi (api.vibi.pro). Một key Vibi dùng được ElevenLabs (mặc định `eleven_v4_turbo`), MiniMax và CapCut. Cài xong, agent tự biết cách tìm giọng, xem credit, đọc thử rồi đọc cả kịch bản.
+Plugin Claude Code cho toàn bộ API Vibi ([tài liệu chính thức](https://vibi.pro/docs)). Một key Vibi dùng được ElevenLabs (mặc định `eleven_v4_turbo`), MiniMax và CapCut. Cài xong, agent tự biết cách tạo giọng đọc, làm hội thoại nhiều giọng, đổi giọng, lồng tiếng video, clone giọng MiniMax, chuyển giọng thành chữ, làm SRT theo câu hoặc từng từ, và quản lý lịch sử. Agent luôn báo số credit trước khi tiêu.
 
-Cần: Claude Code, Python 3.8+ và một tài khoản Vibi có API key riêng (credit trừ theo key của bạn). Không cần cài thêm gói Python nào.
+Cần: Claude Code, Python 3.8+ và một tài khoản Vibi có API key riêng (credit trừ theo key của bạn). Không cần cài thêm gói Python nào. `ffprobe` (đi kèm ffmpeg) là tùy chọn, dùng để ước tính credit cho `dub` và `voice-change`.
 
-Plugin không chính thức, không thuộc Vibi hay ElevenLabs. Text bạn gửi đi qua server của Vibi.
+Plugin không chính thức, không thuộc Vibi hay ElevenLabs. Text và audio bạn gửi đi qua server của Vibi.
+
+## Độ phủ API
+
+Thử thật ngày 2026-11-06 với key thật:
+
+| Nhóm | Endpoint | Lệnh | Đã chạy thật |
+|---|---|---|---|
+| Text to speech | `POST /v1/text-to-speech/{voice_id}`, `GET /v1/history/{id}` | `speak`, `resume` | ✅ ElevenLabs, MiniMax, CapCut |
+| | `GET /v1/history`, `POST .../retry`, `DELETE .../{id}` | `history`, `retry`, `delete` | ✅ |
+| Dialogue | `POST /v1/dialogue` | `dialogue` | ✅ ElevenLabs + CapCut |
+| Voice changer | `POST /v1/voice-changer` | `voice-change` | ⚠️ Vibi trả 503 "đang bảo trì" |
+| | history, detail, retry, delete | `history/task/retry/delete --kind voice-changer` | ✅ history (trống); retry, delete chưa có task để thử |
+| AI dubbing | upload init, chunk, complete; history, detail, retry | `dub`, `history/task/retry --kind dubbing` | ✅ |
+| | `DELETE /v1/aidubbing/history/{id}` | `delete --kind dubbing` | chưa thử (giữ bản lồng tiếng) |
+| MiniMax voices | system voices, cloned voices, clone, delete | `voices`, `clone`, `clone-delete` | ✅ (clone thử bằng file im lặng: API nhận đúng trường, trả "No voice detected") |
+| | `POST /v1/minimax/voices/{id}/retry` | `clone-retry` | chưa thử (cần một giọng clone thật) |
+| ElevenLabs voices | default, shared | `voices` | ✅ |
+| CapCut voices | system voices | `voices --provider capcut` | ✅ |
+| Speech to text | submit, get, list, delete | `transcribe`, `words`, `history/task/delete --kind stt` | ✅ |
+| Models, languages, auth | `GET /v1/models`, `/v1/languages`, `/v1/auth/me` | `models`, `languages`, `credits` | ✅ |
+| API keys | `GET /v1/api-keys`, `POST .../regenerate` | không có | ❌ Endpoint dùng phiên đăng nhập web; gọi bằng API key trả 401. Quản lý key trên vibi.pro |
+
+33/35 endpoint có lệnh; 2 endpoint API key không gọi được bằng API key.
 
 ## Cài nhanh bằng một prompt
 
