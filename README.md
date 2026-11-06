@@ -29,7 +29,7 @@ Thử thật ngày 2026-11-06 với key thật:
 | | history, detail, retry, delete | `history/task/retry/delete --kind voice-changer` | ✅ history (trống); retry, delete chưa có task để thử |
 | AI dubbing | upload init, chunk, complete; history, detail, retry | `dub`, `history/task/retry --kind dubbing` | ✅ |
 | | `DELETE /v1/aidubbing/history/{id}` | `delete --kind dubbing` | chưa thử (giữ bản lồng tiếng) |
-| MiniMax voices | system voices, cloned voices, clone, delete | `voices`, `clone`, `clone-delete` | ✅ (clone thử bằng file im lặng: API nhận đúng trường, trả "No voice detected") |
+| MiniMax voices | system voices, cloned voices, clone, delete | `voices`, `clone`, `clone-delete` | ✅ clone thật từ mẫu tiếng Việt 41 giây (1.000 credit), rồi đọc bằng giọng clone |
 | | `POST /v1/minimax/voices/{id}/retry` | `clone-retry` | chưa thử (cần một giọng clone thật) |
 | ElevenLabs voices | default, shared | `voices` | ✅ |
 | CapCut voices | system voices | `voices --provider capcut` | ✅ |

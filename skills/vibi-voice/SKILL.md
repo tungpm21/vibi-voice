@@ -144,7 +144,8 @@ Chỉ dùng được giọng ElevenLabs. File tối đa 50 MB, 5 phút, khoảng
 
 ## Clone giọng MiniMax (`clone`)
 
-- File mẫu tối đa 20 MB, là giọng nói rõ, không có nhạc nền. Lệnh chờ tới khi `status` thành `done`, rồi in `clone_id` để dùng như `speak --provider minimax --voice CLONE_ID` hoặc trong `dialogue`, `dub`.
+- Mỗi lần clone tốn khoảng 1.000 credit; báo người dùng trước. Kiểm tra `voices --provider minimax --library cloned` xem giọng đó đã clone chưa, tránh clone lại.
+- File mẫu tối đa 20 MB, là giọng nói rõ của một người, không có nhạc nền; 30–60 giây là đủ (thử thật: 41 giây tiếng Việt cho giọng clone dùng được ngay). Lệnh chờ tới khi `status` thành `done` (khoảng 1 phút), rồi in `clone_id` để dùng như `speak --provider minimax --voice CLONE_ID` hoặc trong `dialogue`, `dub`. `--sample-out` lưu đoạn nghe thử Vibi tự tạo.
 - File không có giọng nói thì Vibi trả `failed` ("No voice detected") và không trừ credit.
 - Xem các giọng đã clone: `voices --provider minimax --library cloned`.
 
@@ -158,6 +159,8 @@ Chỉ dùng được giọng ElevenLabs. File tối đa 50 MB, 5 phút, khoảng
 | `dialogue` ElevenLabs + CapCut | 69 ký tự | 17 |
 | `transcribe` / `words` | 5 giây audio | 1–2 |
 | `dub` | 5 giây | 253 (50/giây) |
+| `clone` | mẫu 41 giây | 1.000 (`clone-retry` trừ lại từng ấy) |
+| `speak` bằng giọng clone MiniMax | 95 ký tự | 57 |
 
 Con số thật luôn nằm ở `credits_deducted` trong kết quả.
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "vibi-voice",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Toàn bộ API Vibi (api.vibi.pro) bằng một key: giọng đọc ElevenLabs v4, MiniMax, CapCut, hội thoại, đổi giọng, lồng tiếng AI, clone giọng MiniMax, speech-to-text, SRT từng từ",
   "author": {
     "name": "tungpm21",

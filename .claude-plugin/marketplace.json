@@ -10,7 +10,7 @@
       "name": "vibi-voice",
       "source": "./",
       "description": "Toàn bộ API Vibi (api.vibi.pro) bằng một key: giọng đọc ElevenLabs v4, MiniMax, CapCut, hội thoại, đổi giọng, lồng tiếng AI, clone giọng MiniMax, speech-to-text, SRT từng từ",
-      "version": "1.2.0"
+      "version": "1.2.1"
     }
   ]
 }
